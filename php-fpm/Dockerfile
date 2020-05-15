@@ -1,4 +1,4 @@
-FROM php:7.3.11-fpm-alpine
+FROM php:7.4.6-fpm-alpine
 
 ENV TZ=Asia/Shanghai
 
@@ -12,17 +12,14 @@ RUN apk update \
 	&& apk add \
 		freetype \
 		freetype-dev \
-		libpng \
-		libpng-dev \
 		libjpeg-turbo \
 		libjpeg-turbo-dev \
 	&& docker-php-ext-configure gd \
-		--with-freetype-dir=/usr/include/ \
-		--with-jpeg-dir=/usr/include/ \
+		--with-freetype=/usr/include/ \
+		--with-jpeg=/usr/include/ \
 	&& docker-php-ext-install -j$(nproc) gd \
 	&& apk del \
 		freetype-dev \
-		libpng-dev \
 		libjpeg-turbo-dev \
 	\
 	&& rm /var/cache/apk/*
