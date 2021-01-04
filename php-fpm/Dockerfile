@@ -1,4 +1,4 @@
-FROM php:7.4.6-fpm-alpine
+FROM php:7.4.13-fpm-alpine
 
 ENV TZ=Asia/Shanghai
 
