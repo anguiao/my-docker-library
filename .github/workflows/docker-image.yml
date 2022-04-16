@@ -1,0 +1,19 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build-nginx:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build nginx Docker image
+      run: cd nginx-brotli && docker build . --file Dockerfile --tag anguiao/nginx-brotli
+  build-php:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build PHP Docker image
+      run: cd php-fpm && docker build . --file Dockerfile --tag anguiao/php-fpm
