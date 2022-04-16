@@ -1,15 +1,14 @@
-FROM php:7.4.14-fpm-alpine
+FROM php:8.1.4-fpm-alpine
 
 ENV TZ=Asia/Shanghai
 
-RUN apk update \
-	&& apk add tzdata \
+RUN apk add --no-cache tzdata \
 	&& echo "${TZ}" > /etc/timezone \
 	&& ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
 	\
 	&& docker-php-ext-install -j$(nproc) pdo_mysql \
 	\
-	&& apk add \
+	&& apk add --no-cache \
 		freetype \
 		freetype-dev \
 		libjpeg-turbo \
@@ -20,9 +19,7 @@ RUN apk update \
 	&& docker-php-ext-install -j$(nproc) gd \
 	&& apk del \
 		freetype-dev \
-		libjpeg-turbo-dev \
-	\
-	&& rm /var/cache/apk/*
+		libjpeg-turbo-dev
 
 COPY ./php.ini /usr/local/etc/php/
 COPY ./www.conf /usr/local/etc/php-fpm.d/
