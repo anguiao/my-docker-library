@@ -1,148 +1,78 @@
-FROM alpine:3.12
+FROM nginx:1.21.6-alpine as builder
+
+ARG ENABLED_MODULES=brotli
+
+RUN set -ex \
+    && if [ "$ENABLED_MODULES" = "" ]; then \
+        echo "No additional modules enabled, exiting"; \
+        exit 1; \
+    fi
+
+COPY ./ /modules/
+
+RUN set -ex \
+    && apk update \
+    && apk add linux-headers openssl-dev pcre2-dev zlib-dev openssl abuild \
+               musl-dev libxslt libxml2-utils make mercurial gcc unzip git \
+               xz g++ coreutils \
+    # allow abuild as a root user \
+    && printf "#!/bin/sh\\nSETFATTR=true /usr/bin/abuild -F \"\$@\"\\n" > /usr/local/bin/abuild \
+    && chmod +x /usr/local/bin/abuild \
+    && hg clone -r ${NGINX_VERSION}-${PKG_RELEASE} https://hg.nginx.org/pkg-oss/ \
+    && cd pkg-oss \
+    && mkdir /tmp/packages \
+    && for module in $ENABLED_MODULES; do \
+        echo "Building $module for nginx-$NGINX_VERSION"; \
+        if [ -d /modules/$module ]; then \
+            echo "Building $module from user-supplied sources"; \
+            # check if module sources file is there and not empty
+            if [ ! -s /modules/$module/source ]; then \
+                echo "No source file for $module in modules/$module/source, exiting"; \
+                exit 1; \
+            fi; \
+            # some modules require build dependencies
+            if [ -f /modules/$module/build-deps ]; then \
+                echo "Installing $module build dependencies"; \
+                apk update && apk add $(cat /modules/$module/build-deps | xargs); \
+            fi; \
+            # if a module has a build dependency that is not in a distro, provide a
+            # shell script to fetch/build/install those
+            # note that shared libraries produced as a result of this script will
+            # not be copied from the builder image to the main one so build static
+            if [ -x /modules/$module/prebuild ]; then \
+                echo "Running prebuild script for $module"; \
+                /modules/$module/prebuild; \
+            fi; \
+            /pkg-oss/build_module.sh -v $NGINX_VERSION -f -y -o /tmp/packages -n $module $(cat /modules/$module/source); \
+            BUILT_MODULES="$BUILT_MODULES $(echo $module | tr '[A-Z]' '[a-z]' | tr -d '[/_\-\.\t ]')"; \
+        elif make -C /pkg-oss/alpine list | grep -E "^$module\s+\d+" > /dev/null; then \
+            echo "Building $module from pkg-oss sources"; \
+            cd /pkg-oss/alpine; \
+            make abuild-module-$module BASE_VERSION=$NGINX_VERSION NGINX_VERSION=$NGINX_VERSION; \
+            apk add $(. ./abuild-module-$module/APKBUILD; echo $makedepends;); \
+            make module-$module BASE_VERSION=$NGINX_VERSION NGINX_VERSION=$NGINX_VERSION; \
+            find ~/packages -type f -name "*.apk" -exec mv -v {} /tmp/packages/ \;; \
+            BUILT_MODULES="$BUILT_MODULES $module"; \
+        else \
+            echo "Don't know how to build $module module, exiting"; \
+            exit 1; \
+        fi; \
+    done \
+    && echo "BUILT_MODULES=\"$BUILT_MODULES\"" > /tmp/packages/modules.env
+
+FROM nginx:1.21.6-alpine
 
 ENV TZ=Asia/Shanghai
 
-ENV NGINX_VERSION 1.19.6
+COPY --from=builder /tmp/packages /tmp/packages
 
-RUN NGINX_GPG_KEYS=B0F4253373F8F6F510D42178520A9993A1C052F8 \
-	&& CONFIG="\
-		--prefix=/etc/nginx \
-		--sbin-path=/usr/sbin/nginx \
-		--modules-path=/usr/lib/nginx/modules \
-		--conf-path=/etc/nginx/nginx.conf \
-		--error-log-path=/var/log/nginx/error.log \
-		--http-log-path=/var/log/nginx/access.log \
-		--pid-path=/var/run/nginx.pid \
-		--lock-path=/var/run/nginx.lock \
-		--http-client-body-temp-path=/var/cache/nginx/client_temp \
-		--http-proxy-temp-path=/var/cache/nginx/proxy_temp \
-		--http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
-		--http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
-		--http-scgi-temp-path=/var/cache/nginx/scgi_temp \
-		--user=www-data \
-		--group=www-data \
-		--with-http_ssl_module \
-		--with-http_realip_module \
-		--with-http_addition_module \
-		--with-http_sub_module \
-		--with-http_dav_module \
-		--with-http_flv_module \
-		--with-http_mp4_module \
-		--with-http_gunzip_module \
-		--with-http_gzip_static_module \
-		--with-http_random_index_module \
-		--with-http_secure_link_module \
-		--with-http_stub_status_module \
-		--with-http_auth_request_module \
-		--with-http_xslt_module=dynamic \
-		--with-http_image_filter_module=dynamic \
-		--with-http_geoip_module=dynamic \
-		--with-threads \
-		--with-stream \
-		--with-stream_ssl_module \
-		--with-stream_ssl_preread_module \
-		--with-stream_realip_module \
-		--with-stream_geoip_module=dynamic \
-		--with-http_slice_module \
-		--with-mail \
-		--with-mail_ssl_module \
-		--with-compat \
-		--with-file-aio \
-		--with-http_v2_module \
-		--add-module=/usr/src/ngx_brotli \
-	" \
-	&& addgroup -g 82 -S www-data \
-	&& adduser -u 82 -D -S -h /var/cache/nginx -s /sbin/nologin -G www-data www-data \
-	\
-	&& apk update \
-	\
-	&& apk add --virtual .build-deps \
-		gcc \
-		libc-dev \
-		make \
-		openssl-dev \
-		pcre-dev \
-		zlib-dev \
-		linux-headers \
-		curl \
-		gnupg1 \
-		libxslt-dev \
-		gd-dev \
-		geoip-dev \
-		git \
-	&& curl -fSL https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz -o nginx.tar.gz \
-	&& curl -fSL https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz.asc  -o nginx.tar.gz.asc \
-	&& export GNUPGHOME="$(mktemp -d)" \
-	&& gpg --keyserver ha.pool.sks-keyservers.net --recv-keys "$NGINX_GPG_KEYS" \
-	&& gpg --batch --verify nginx.tar.gz.asc nginx.tar.gz \
-	&& rm -rf "$GNUPGHOME" nginx.tar.gz.asc \
-	&& mkdir -p /usr/src \
-	&& tar -zxC /usr/src -f nginx.tar.gz \
-	&& rm nginx.tar.gz \
-	&& git clone https://github.com/google/ngx_brotli.git /usr/src/ngx_brotli \
-	&& cd /usr/src/ngx_brotli \
-	&& git submodule update --init \
-	&& cd /usr/src/nginx-$NGINX_VERSION \
-	&& ./configure $CONFIG --with-debug \
-	&& make -j$(getconf _NPROCESSORS_ONLN) \
-	&& mv objs/nginx objs/nginx-debug \
-	&& mv objs/ngx_http_xslt_filter_module.so objs/ngx_http_xslt_filter_module-debug.so \
-	&& mv objs/ngx_http_image_filter_module.so objs/ngx_http_image_filter_module-debug.so \
-	&& mv objs/ngx_http_geoip_module.so objs/ngx_http_geoip_module-debug.so \
-	&& mv objs/ngx_stream_geoip_module.so objs/ngx_stream_geoip_module-debug.so \
-	&& ./configure $CONFIG \
-	&& make -j$(getconf _NPROCESSORS_ONLN) \
-	&& make install \
-	&& rm -rf /etc/nginx/html/ \
-	&& mkdir /etc/nginx/conf.d/ \
-	&& mkdir -p /usr/share/nginx/html/ \
-	&& install -m644 html/index.html /usr/share/nginx/html/ \
-	&& install -m644 html/50x.html /usr/share/nginx/html/ \
-	&& install -m755 objs/nginx-debug /usr/sbin/nginx-debug \
-	&& install -m755 objs/ngx_http_xslt_filter_module-debug.so /usr/lib/nginx/modules/ngx_http_xslt_filter_module-debug.so \
-	&& install -m755 objs/ngx_http_image_filter_module-debug.so /usr/lib/nginx/modules/ngx_http_image_filter_module-debug.so \
-	&& install -m755 objs/ngx_http_geoip_module-debug.so /usr/lib/nginx/modules/ngx_http_geoip_module-debug.so \
-	&& install -m755 objs/ngx_stream_geoip_module-debug.so /usr/lib/nginx/modules/ngx_stream_geoip_module-debug.so \
-	&& ln -s ../../usr/lib/nginx/modules /etc/nginx/modules \
-	&& strip /usr/sbin/nginx* \
-	&& strip /usr/lib/nginx/modules/*.so \
-	&& rm -rf /usr/src/nginx-$NGINX_VERSION /usr/src/ngx_brotli \
-	\
-	# Bring in gettext so we can get `envsubst`, then throw
-	# the rest away. To do this, we need to install `gettext`
-	# then move `envsubst` out of the way so `gettext` can
-	# be deleted completely, then move `envsubst` back.
-	&& apk add --virtual .gettext gettext \
-	&& mv /usr/bin/envsubst /tmp/ \
-	\
-	&& runDeps="$( \
-		scanelf --needed --nobanner --format '%n#p' /usr/sbin/nginx /usr/lib/nginx/modules/*.so /tmp/envsubst \
-			| tr ',' '\n' \
-			| sort -u \
-			| awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }' \
-	)" \
-	&& apk add --virtual .nginx-rundeps $runDeps \
-	&& apk del .build-deps \
-	&& apk del .gettext \
-	&& mv /tmp/envsubst /usr/local/bin/ \
-	\
-	# Bring in tzdata so users could set the timezones through the environment
-	# variables
-	&& apk add tzdata \
-	&& echo "${TZ}" > /etc/timezone \
-	&& ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
-	\
-	# forward request and error logs to docker log collector
-	&& ln -sf /dev/stdout /var/log/nginx/access.log \
-	&& ln -sf /dev/stderr /var/log/nginx/error.log \
-	\
-	&& rm /var/cache/apk/*
-
-COPY nginx.conf /etc/nginx/nginx.conf
-COPY nginx.vh.default.conf /etc/nginx/conf.d/default.conf
-
-EXPOSE 80 443
-
-STOPSIGNAL SIGTERM
-
-CMD ["nginx", "-g", "daemon off;"]
+RUN apk add --no-cache tzdata \
+    && echo "${TZ}" > /etc/timezone \
+    && ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime \
+    \
+    && set -ex \
+    && . /tmp/packages/modules.env \
+    && for module in $BUILT_MODULES; do \
+           apk add --no-cache --allow-untrusted /tmp/packages/nginx-module-${module}-${NGINX_VERSION}*.apk; \
+       done \
+    && rm -rf /tmp/packages
